@@ -62,9 +62,6 @@ const getActiveBill = async () => {
   return bill;
 };
 
-const calculateDaysLeft = (dueDate) =>
-  Math.ceil((new Date(dueDate) - new Date()) / (1000 * 60 * 60 * 24));
-
 const formatCurrency = (amount) =>
   `₦${Number(amount || 0).toFixed(2)}`;
 
@@ -104,7 +101,7 @@ bot.start(async (ctx) => {
 });
 
 /* =====================================================
-   NEW BILL (CLEANED & FIXED)
+   NEW BILL (CASE-INSENSITIVE FIX)
 ===================================================== */
 
 bot.command("newbill", async (ctx) => {
@@ -120,28 +117,32 @@ bot.command("newbill", async (ctx) => {
     if (!amount || amount <= 0)
       return safeReply(ctx, "Invalid amount.");
 
+    // Extract tagged usernames without forcing lowercase
     const taggedUsernames = parts
       .slice(2)
       .filter(p => p.startsWith("@"))
-      .map(u => u.replace("@", "").toLowerCase());
+      .map(u => u.replace("@", ""));
 
-    let users;
+    let users = [];
 
     if (taggedUsernames.length === 0) {
       // ALL ACTIVE USERS INCLUDING ADMIN
       users = await User.find({ isActive: true });
     } else {
+      // Create case-insensitive regex for each tagged user
+      const regexUsernames = taggedUsernames.map(u => new RegExp(`^${u}$`, "i"));
+      
       users = await User.find({
         isActive: true,
-        username: { $in: taggedUsernames }
+        username: { $in: regexUsernames }
       });
 
       if (users.length !== taggedUsernames.length)
-        return safeReply(ctx, "Some tagged users not found or inactive.");
+        return safeReply(ctx, "⚠️ Some tagged users were not found or are inactive.");
 
       // ALWAYS include admin
       const adminUser = await User.findOne({ telegramId: process.env.ADMIN_ID });
-      if (adminUser && !users.some(u => u.telegramId === adminUser.telegramId)) {
+      if (adminUser && !users.some(u => u.telegramId.toString() === adminUser.telegramId.toString())) {
         users.push(adminUser);
       }
     }
@@ -162,7 +163,7 @@ bot.command("newbill", async (ctx) => {
       totalPeople: users.length,
       dueDate,
       payments: [],
-      billedTenants: users.map(u => u.telegramId),
+      billedTenants: users.map(u => u.telegramId.toString()), // Force string IDs
       isActive: true,
       createdAt: new Date()
     });
@@ -187,7 +188,7 @@ bot.command("newbill", async (ctx) => {
 });
 
 /* =====================================================
-   PAY (HARDENED)
+   PAY (ISOLATED DM HANDLING)
 ===================================================== */
 
 bot.command("pay", async (ctx) => {
@@ -197,16 +198,17 @@ bot.command("pay", async (ctx) => {
     const telegramId = ctx.from.id.toString();
     const user = await User.findOne({ telegramId });
 
-    if (!user) return safeReply(ctx, "❌ Not registered.");
+    if (!user) return safeReply(ctx, "❌ Not registered. Send me a private message to register.");
     if (!user.isActive) return safeReply(ctx, "🚫 Inactive.");
 
     const bill = await getActiveBill();
     if (!bill) return safeReply(ctx, "❌ No active bill.");
 
+    // Ensure strict string comparison
     const tenantIds = bill.billedTenants.map(id => id.toString());
 
     if (!tenantIds.includes(telegramId))
-        return safeReply(ctx, "You are not part of this bill.");
+        return safeReply(ctx, "❌ You are not part of this bill.");
 
     if (bill.payments.some(p => p.telegramId === telegramId))
       return safeReply(ctx, "✅ Already paid.");
@@ -214,46 +216,59 @@ bot.command("pay", async (ctx) => {
     if (!process.env.PAYSTACK_SECRET_KEY)
       return safeReply(ctx, "❌ Payment system not configured.");
 
-    const response = await axios.post(
-      "https://api.paystack.co/transaction/initialize",
-      {
-        email: `${telegramId}@compound.com`,
-        amount: Math.round(bill.splitAmount * 100),
-        currency: "NGN",
-        metadata: { telegramId }
-      },
-      {
-        headers: {
-          Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`,
-          "Content-Type": "application/json"
+    // 1. ISOLATED PAYSTACK INITIALIZATION
+    let response;
+    try {
+      response = await axios.post(
+        "https://api.paystack.co/transaction/initialize",
+        {
+          email: `${telegramId}@compound.com`,
+          amount: Math.round(bill.splitAmount * 100),
+          currency: "NGN",
+          metadata: { telegramId }
         },
-        timeout: 10000
-      }
-    );
-
-    console.log("User:", telegramId);
-    console.log("Bill tenants:", bill.billedTenants);
+        {
+          headers: {
+            Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`,
+            "Content-Type": "application/json"
+          },
+          timeout: 10000
+        }
+      );
+    } catch (paystackErr) {
+      console.error("Paystack Error:", paystackErr.response?.data || paystackErr.message);
+      return safeReply(ctx, "❌ Payment provider is currently unavailable.");
+    }
 
     const link = response.data?.data?.authorization_url;
 
     if (!link) {
-      console.error("Paystack response:", response.data);
-      return safeReply(ctx, "❌ Payment initialization failed.");
+      return safeReply(ctx, "❌ Unable to generate payment link.");
     }
 
-    await ctx.telegram.sendMessage(
-      telegramId,
-      `💳 Electricity Bill\nAmount: ${formatCurrency(bill.splitAmount)}`,
-      Markup.inlineKeyboard([
-        Markup.button.url("💰 Pay Now", link)
-      ])
-    );
-
-    safeReply(ctx, "🔒 Payment link sent privately.");
+    // 2. ISOLATED TELEGRAM DM HANDLING
+    try {
+      await ctx.telegram.sendMessage(
+        telegramId,
+        `💳 Electricity Bill\nAmount: ${formatCurrency(bill.splitAmount)}`,
+        Markup.inlineKeyboard([
+          Markup.button.url("💰 Pay Now", link)
+        ])
+      );
+      return safeReply(ctx, "🔒 Payment link sent privately. Check your DMs!");
+    } catch (tgErr) {
+      console.error("Telegram DM Error:", tgErr.message);
+      return safeReply(
+        ctx,
+        "❌ I can't DM you the payment link because you haven't started a chat with me.\n\n" +
+        "👉 **Please click my profile, send me a `/start` message, and then try `/pay` again.**",
+        { parse_mode: "Markdown" }
+      );
+    }
 
   } catch (err) {
-    console.error("PAY ERROR:", err.response?.data || err.message);
-    safeReply(ctx, "❌ Payment initialization failed.");
+    console.error("PAY COMMAND FATAL ERROR:", err);
+    safeReply(ctx, "❌ An unexpected error occurred.");
   }
 });
 
@@ -296,9 +311,11 @@ app.post("/paystack-webhook", async (req, res) => {
 
     await bill.save();
 
+    const userMention = user ? mentionUser(user) : "A tenant";
+
     await bot.telegram.sendMessage(
       process.env.GROUP_ID,
-      `🎉 ${mentionUser(user)} paid ${formatCurrency(amount)}`,
+      `🎉 ${userMention} paid ${formatCurrency(amount)}`,
       { parse_mode: "HTML" }
     );
 
