@@ -1,5 +1,6 @@
 const mongoose = require("mongoose");
 
+// Define the structure for individual payments embedded in the bill
 const paymentSchema = new mongoose.Schema({
   telegramId: {
     type: String,
@@ -14,6 +15,7 @@ const paymentSchema = new mongoose.Schema({
   },
 });
 
+// Define the main bill structure
 const billSchema = new mongoose.Schema(
   {
     totalAmount: Number,
@@ -25,8 +27,8 @@ const billSchema = new mongoose.Schema(
       default: true,
     },
     lateFeeApplied: Boolean,
-    billedTenants: [String], // 🔥 ADDED: This tells Mongoose to save the Telegram IDs!
-    payments: [paymentSchema], 
+    billedTenants: [String], // 🔥 CRUCIAL: Mongoose will now save the Telegram IDs
+    payments: [paymentSchema], // Embedded payments array
   },
   { timestamps: true }
 );
