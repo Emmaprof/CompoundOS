@@ -229,6 +229,9 @@ bot.command("pay", async (ctx) => {
       }
     );
 
+    console.log("User:", telegramId);
+    console.log("Bill tenants:", bill.billedTenants);
+
     const link = response.data?.data?.authorization_url;
 
     if (!link) {
