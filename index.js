@@ -358,6 +358,148 @@ bot.command("mybalance", async (ctx) => {
 });
 
 /* =====================================================
+   COMMAND: /markpaid (MANUAL RECONCILIATION)
+===================================================== */
+bot.command("markpaid", async (ctx) => {
+  try {
+    if (ctx.chat.type !== "private") {
+      try { await ctx.deleteMessage(); } catch {}
+    }
+    
+    // Strict admin-only access
+    if (!isAdmin(ctx)) return;
+
+    // Expected format: /markpaid 2000 @username CASH-REF
+    const parts = ctx.message.text.trim().split(/\s+/);
+    if (parts.length < 4) {
+      return safeReply(
+        ctx, 
+        "📝 Usage: `/markpaid <amount> <@tenant> <reference>`\nExample: `/markpaid 2000 @johndoe CASH-JAN`", 
+        { parse_mode: "Markdown" }
+      );
+    }
+
+    const amount = parseFloat(parts[1]);
+    if (isNaN(amount) || amount <= 0) return safeReply(ctx, "❌ Invalid amount.");
+
+    const usernameTag = parts[2].replace("@", "");
+    // Join any remaining parts into a single reference string
+    const reference = parts.slice(3).join("-").toUpperCase(); 
+
+    // Find the user case-insensitively
+    const user = await User.findOne({ username: new RegExp(`^${usernameTag}$`, "i") });
+    if (!user) return safeReply(ctx, `❌ Could not find user @${usernameTag} in the database.`);
+
+    const telegramId = String(user.telegramId);
+
+    const bill = await Bill.findOne({ isActive: true });
+    if (!bill) return safeReply(ctx, "❌ There is no active electricity bill right now.");
+
+    if (!bill.billedTenants.includes(telegramId)) {
+      return safeReply(ctx, "❌ That user is not part of the current active bill.");
+    }
+
+    if (bill.payments.some(p => String(p.telegramId) === telegramId)) {
+      return safeReply(ctx, "✅ That user has already paid for this billing cycle.");
+    }
+
+    // Push the manual payment to the embedded array
+    bill.payments.push({
+      telegramId: telegramId,
+      fullName: user.fullName,
+      amount: amount,
+      reference: `MANUAL-${reference}`,
+      paidAt: new Date()
+    });
+
+    await bill.save();
+
+    // Broadcast the success to the compound group just like the webhook does
+    await bot.telegram.sendMessage(
+      process.env.GROUP_ID,
+      `✅ <b>Manual Payment Received!</b>\n\n` +
+      `${mentionUser(user)} has paid ${formatCurrency(amount)} offline.\n` +
+      `🧾 Ref: <code>MANUAL-${reference}</code>\n` +
+      `📊 Progress: ${bill.payments.length} / ${bill.totalPeople} paid.`,
+      { parse_mode: "HTML" }
+    );
+
+    // Reply to the admin privately to confirm execution
+    safeReply(ctx, `✅ Successfully marked ${user.username || user.fullName} as paid.`);
+
+  } catch (err) {
+    console.error("Markpaid command error:", err);
+    safeReply(ctx, "❌ An error occurred while processing the manual payment.");
+  }
+});
+
+/* =====================================================
+   COMMAND: /deactivate & /activate (TENANT STATUS)
+===================================================== */
+bot.command("deactivate", async (ctx) => {
+  try {
+    if (ctx.chat.type !== "private") {
+      try { await ctx.deleteMessage(); } catch {}
+    }
+    
+    if (!isAdmin(ctx)) return;
+
+    const parts = ctx.message.text.trim().split(/\s+/);
+    if (parts.length < 2) return safeReply(ctx, "📝 Usage: `/deactivate @tenant`", { parse_mode: "Markdown" });
+
+    const usernameTag = parts[1].replace("@", "");
+    const user = await User.findOne({ username: new RegExp(`^${usernameTag}$`, "i") });
+
+    if (!user) return safeReply(ctx, "❌ User not found in the database.");
+    
+    // Safety lock: Prevent admin from deactivating themselves
+    if (String(user.telegramId) === process.env.ADMIN_ID) {
+      return safeReply(ctx, "❌ Security constraint: You cannot deactivate the Admin account.");
+    }
+
+    if (!user.isActive) return safeReply(ctx, "⚠️ This user is already deactivated.");
+
+    user.isActive = false;
+    await user.save();
+
+    safeReply(ctx, `🚫 <b>Account Deactivated</b>\n${mentionUser(user)} is marked as inactive and will be excluded from future bills.`, { parse_mode: "HTML" });
+
+  } catch (err) {
+    console.error("Deactivate error:", err);
+    safeReply(ctx, "❌ Error deactivating user.");
+  }
+});
+
+bot.command("activate", async (ctx) => {
+  try {
+    if (ctx.chat.type !== "private") {
+      try { await ctx.deleteMessage(); } catch {}
+    }
+    
+    if (!isAdmin(ctx)) return;
+
+    const parts = ctx.message.text.trim().split(/\s+/);
+    if (parts.length < 2) return safeReply(ctx, "📝 Usage: `/activate @tenant`", { parse_mode: "Markdown" });
+
+    const usernameTag = parts[1].replace("@", "");
+    const user = await User.findOne({ username: new RegExp(`^${usernameTag}$`, "i") });
+
+    if (!user) return safeReply(ctx, "❌ User not found in the database.");
+    
+    if (user.isActive) return safeReply(ctx, "⚠️ This user is already active.");
+
+    user.isActive = true;
+    await user.save();
+
+    safeReply(ctx, `✅ <b>Account Activated</b>\n${mentionUser(user)} is active again and will be included when the next bill is generated.`, { parse_mode: "HTML" });
+
+  } catch (err) {
+    console.error("Activate error:", err);
+    safeReply(ctx, "❌ Error activating user.");
+  }
+});
+
+/* =====================================================
    WEBHOOK (PAYSTACK LISTENER)
 ===================================================== */
 app.post("/paystack-webhook", async (req, res) => {
