@@ -24,8 +24,9 @@ const billSchema = new mongoose.Schema(
       type: Boolean,
       default: true,
     },
-    lateFeeApplied:Boolean,
-    payments: [paymentSchema], // 🔥 NEW STRUCTURE
+    lateFeeApplied: Boolean,
+    billedTenants: [String], // 🔥 ADDED: This tells Mongoose to save the Telegram IDs!
+    payments: [paymentSchema], 
   },
   { timestamps: true }
 );
