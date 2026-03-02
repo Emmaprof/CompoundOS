@@ -28,6 +28,11 @@ const app = express();
 app.use("/paystack-webhook", express.raw({ type: "application/json" }));
 app.use(express.json());
 
+// Webhooks MUST be parsed as raw data to verify the cryptographic signatures
+app.use("/paystack-webhook", express.raw({ type: "application/json" }));
+app.use("/crypto-webhook", express.raw({ type: "application/json" })); // 🔥 Your new Web3 middleware
+app.use(express.json());
+
 /* =====================================================
    UTILITIES
 ===================================================== */
@@ -249,6 +254,74 @@ bot.command("pay", async (ctx) => {
   } catch (err) {
     console.error("Pay command error:", err);
     safeReply(ctx, "❌ An unexpected error occurred while processing your request.");
+  }
+});
+/* =====================================================
+   COMMAND: /cryptopay (NOWPAYMENTS WEB3 GATEWAY)
+===================================================== */
+bot.command("cryptopay", async (ctx) => {
+  try {
+    if (ctx.chat.type !== "private") {
+      try { await ctx.deleteMessage(); } catch {}
+    }
+
+    const telegramId = String(ctx.from.id);
+    const user = await User.findOne({ telegramId });
+
+    if (!user) return safeReply(ctx, "❌ You must register first. Send me a private `/start`.");
+    if (!user.isActive) return safeReply(ctx, "🚫 Your account is inactive.");
+
+    const bill = await Bill.findOne({ isActive: true });
+    if (!bill) return safeReply(ctx, "❌ There is no active bill right now.");
+    if (!bill.billedTenants.includes(telegramId)) return safeReply(ctx, "❌ You are not included in the current bill.");
+    if (bill.payments.some(p => p.telegramId === telegramId)) return safeReply(ctx, "✅ You have already paid this bill.");
+
+    if (!process.env.NOWPAYMENTS_API_KEY) return safeReply(ctx, "❌ Web3 Gateway not configured.");
+
+    // Initialize NowPayments Invoice
+    let cryptoRes;
+    try {
+      cryptoRes = await axios.post(
+        "https://api.nowpayments.io/v1/invoice",
+        {
+          price_amount: bill.splitAmount,
+          price_currency: "ngn", // The API converts NGN to live crypto value
+          order_id: `WEB3-${telegramId}-${Date.now()}`,
+          order_description: "Compound Electricity Bill",
+        },
+        {
+          headers: {
+            "x-api-key": process.env.NOWPAYMENTS_API_KEY,
+            "Content-Type": "application/json"
+          }
+        }
+      );
+    } catch (apiErr) {
+      console.error("Crypto API Error:", apiErr.response?.data || apiErr.message);
+      return safeReply(ctx, "❌ Web3 Payment provider is currently down.");
+    }
+
+    const cryptoLink = cryptoRes.data?.invoice_url;
+    if (!cryptoLink) return safeReply(ctx, "❌ Failed to generate a Web3 payment link.");
+
+    try {
+      await ctx.telegram.sendMessage(
+        telegramId,
+        `🌐 <b>Web3 Electricity Checkout</b>\n\nAmount Due: ${formatCurrency(bill.splitAmount)}\nSupported: USDC & USDT on Base, BNB, Polygon, Avax, Solana.`,
+        {
+          parse_mode: "HTML",
+          ...Markup.inlineKeyboard([Markup.button.url("⛓️ Pay with Crypto", cryptoLink)])
+        }
+      );
+      
+      if (ctx.chat.type !== "private") {
+        return safeReply(ctx, "🔒 I have sent your Web3 payment link to your DMs.");
+      }
+    } catch (tgErr) {
+      return safeReply(ctx, "❌ Please click my profile, send me `/start`, and try again.");
+    }
+  } catch (err) {
+    console.error("CryptoPay error:", err);
   }
 });
 /* =====================================================
@@ -727,7 +800,65 @@ app.post("/paystack-webhook", async (req, res) => {
     console.error("Webhook processing error:", err);
   }
 });
+/* =====================================================
+   WEBHOOK (NOWPAYMENTS WEB3 LISTENER)
+===================================================== */
+app.post("/crypto-webhook", async (req, res) => {
+  try {
+    const signature = req.headers["x-nowpayments-sig"];
+    
+    // NowPayments requires HMAC SHA512 using their IPN Secret
+    const hmac = crypto.createHmac("sha512", process.env.NOWPAYMENTS_IPN_SECRET);
+    hmac.update(req.body); // req.body is raw buffer
+    const hash = hmac.digest("hex");
 
+    if (hash !== signature) {
+      console.warn("⚠️ Unauthorized Web3 webhook attempt.");
+      return res.sendStatus(401);
+    }
+
+    // Acknowledge receipt immediately
+    res.sendStatus(200);
+
+    const event = JSON.parse(req.body.toString());
+    
+    // Only process fully confirmed on-chain transactions
+    if (event.payment_status !== "finished") return; 
+
+    // Extract ID from the custom order_id we created in /cryptopay
+    const telegramId = String(event.order_id.split('-')[1]); 
+    const txHash = event.actually_paid_hash || event.payment_id; // The on-chain TX hash
+    const amountPaidNGN = event.price_amount;
+
+    const bill = await Bill.findOne({ isActive: true });
+    if (!bill || !bill.billedTenants.includes(telegramId)) return;
+    
+    // Prevent double-counting the same blockchain TX
+    if (bill.payments.some(p => p.reference === `WEB3-${txHash}`)) return;
+
+    const user = await User.findOne({ telegramId });
+
+    bill.payments.push({
+      telegramId,
+      fullName: user ? user.fullName : "Web3 Tenant",
+      amount: amountPaidNGN,
+      reference: `WEB3-${txHash}`,
+      paidAt: new Date()
+    });
+    
+    await bill.save();
+
+    await bot.telegram.sendMessage(
+      process.env.GROUP_ID,
+      `🌐 <b>Web3 Payment Verified!</b>\n\n${mentionUser(user)} just paid their bill using Crypto.\n⛓️ TX: <code>${txHash.slice(0,6)}...${txHash.slice(-4)}</code>\n📊 Progress: ${bill.payments.length} / ${bill.totalPeople} paid.`,
+      { parse_mode: "HTML" }
+    );
+
+  } catch (err) {
+    console.error("Crypto Webhook error:", err);
+    if (!res.headersSent) res.sendStatus(500);
+  }
+});
 /* =====================================================
    CRON: DAILY REMINDER (Runs every day at 9 AM)
 ===================================================== */
