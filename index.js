@@ -86,7 +86,58 @@ bot.start(async (ctx) => {
     safeReply(ctx, "❌ An error occurred during registration.");
   }
 });
+/* =====================================================
+   COMMAND: /help (INTERACTIVE DASHBOARD)
+===================================================== */
+bot.command(["help", "menu"], async (ctx) => {
+  try {
+    // Basic buttons every tenant sees
+    let buttons = [
+      [Markup.button.callback("💳 Pay Bill (Naira)", "btn_pay")],
+      [Markup.button.callback("🌐 Pay Bill (Crypto)", "btn_cryptopay")]
+    ];
 
+    // Secret buttons that only inject if the user is the Admin
+    if (isAdmin(ctx)) {
+      buttons.push([Markup.button.callback("📊 View Ledger (Admin)", "btn_ledger")]);
+      buttons.push([Markup.button.callback("📥 Download Data (Admin)", "btn_export")]);
+    }
+
+    const helpText = 
+      `🏠 <b>Compound Utilities Control Center</b>\n\n` +
+      `Welcome to the automated billing system. Please tap an option below to manage your account:`;
+
+    await safeReply(ctx, helpText, {
+      parse_mode: "HTML",
+      ...Markup.inlineKeyboard(buttons)
+    });
+
+  } catch (err) {
+    console.error("Help menu error:", err);
+  }
+});
+/* =====================================================
+   ACTIONS (BUTTON CLICK HANDLERS)
+===================================================== */
+bot.action("btn_pay", async (ctx) => {
+  await ctx.answerCbQuery(); // This stops the loading spinner on the button
+  await ctx.reply("Tap here to generate your Paystack checkout link: 👉 /pay");
+});
+
+bot.action("btn_cryptopay", async (ctx) => {
+  await ctx.answerCbQuery(); 
+  await ctx.reply("Tap here to generate your Web3 checkout link: 👉 /cryptopay");
+});
+
+bot.action("btn_ledger", async (ctx) => {
+  await ctx.answerCbQuery();
+  await ctx.reply("Tap here to pull the real-time financial report: 👉 /ledger");
+});
+
+bot.action("btn_export", async (ctx) => {
+  await ctx.answerCbQuery();
+  await ctx.reply("Tap here to download the database CSV: 👉 /export");
+});
 /* =====================================================
    COMMAND: /newbill (ADMIN ONLY)
 ===================================================== */
