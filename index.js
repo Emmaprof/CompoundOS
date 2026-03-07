@@ -952,32 +952,50 @@ cron.schedule("0 2 * * *", async () => {
   }
 });
 /* =====================================================
-   CRON: DAILY REMINDER (Runs every day at 9 AM)
+   AUTOMATION: DAILY PAYMENT REMINDER (9:00 AM)
 ===================================================== */
+// "0 9 * * *" means run at exactly 9:00 AM every day
 cron.schedule("0 9 * * *", async () => {
   try {
     const bill = await Bill.findOne({ isActive: true });
+    
+    // If there is no active bill, do not send anything
     if (!bill) return;
 
-    const paidIds = bill.payments.map(p => p.telegramId);
-    const unpaidIds = bill.billedTenants.filter(id => !paidIds.includes(id));
+    const paidIds = bill.payments.map(p => String(p.telegramId));
+    const allTenantIds = bill.billedTenants.map(id => String(id));
+    
+    // Find the IDs of tenants who have not paid
+    const unpaidIds = allTenantIds.filter(id => !paidIds.includes(id));
 
+    // If the unpaid array is empty, everyone has paid. Skip the reminder.
     if (unpaidIds.length === 0) return;
 
+    // Fetch the actual user profiles from MongoDB so we can tag them
     const unpaidUsers = await User.find({ telegramId: { $in: unpaidIds } });
-    const mentions = unpaidUsers.map(mentionUser).join(" ");
     
-    const daysLeft = Math.ceil((new Date(bill.dueDate) - new Date()) / (1000 * 60 * 60 * 24));
+    // Build a comma-separated list of tags
+    const unpaidMentions = unpaidUsers.map(u => 
+      u.username ? `@${u.username}` : `<a href="tg://user?id=${u.telegramId}">${u.fullName}</a>`
+    ).join(", ");
 
-    let timeText = daysLeft > 0 ? `${daysLeft} days left` : daysLeft === 0 ? "DUE TODAY" : `OVERDUE by ${Math.abs(daysLeft)} days`;
+    // Construct the professional HTML invoice message
+    const reminderMessage = 
+      `⚠️ <b>DAILY UTILITY REMINDER</b> ⚠️\n\n` +
+      `💰 <b>Amount Due:</b> ₦${bill.splitAmount.toLocaleString()} per flat\n` +
+      `👥 <b>Status:</b> ${paidIds.length} out of ${bill.totalPeople} tenants have paid.\n\n` +
+      `⏳ <b>Waiting on:</b> ${unpaidMentions || "Pending Tenants"}\n\n` +
+      `⚡ Please settle your balance today to avoid compound power disruption.\n\n` +
+      `👉 Tap /pay for Naira (Paystack)\n` +
+      `👉 Tap /cryptopay for Web3 (USDC/USDT)`;
 
-    await bot.telegram.sendMessage(
-      process.env.GROUP_ID,
-      `⏰ <b>Electricity Bill Reminder</b>\n\nAmount Due: ${formatCurrency(bill.splitAmount)}\nStatus: ${timeText}\n\nWaiting on: ${mentions}`,
-      { parse_mode: "HTML" }
-    );
+    // Broadcast the message to the main compound group
+    await bot.telegram.sendMessage(process.env.GROUP_ID, reminderMessage, { parse_mode: "HTML" });
+    
+    console.log("✅ Sent daily formatted reminder to the group.");
+
   } catch (err) {
-    console.error("Cron Reminder Error:", err);
+    console.error("❌ Reminder Cron Error:", err);
   }
 });
 
