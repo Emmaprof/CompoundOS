@@ -56,34 +56,55 @@ const mentionUser = (user) => {
 /* =====================================================
    COMMAND: /start (REGISTRATION)
 ===================================================== */
-bot.start(async (ctx) => {
+/* =====================================================
+   COMMAND: /start (USER ONBOARDING)
+===================================================== */
+bot.command("start", async (ctx) => {
   try {
-    const telegramId = ctx.from.id.toString();
-    const username = ctx.from.username || "";
-    const fullName = `${ctx.from.first_name || ""} ${ctx.from.last_name || ""}`.trim();
-
-    let user = await User.findOne({ telegramId });
-
-    if (!user) {
-      user = await User.create({
-        telegramId,
-        username,
-        fullName,
-        role: telegramId === process.env.ADMIN_ID ? "ADMIN" : "TENANT",
-        isActive: true,
-      });
-      return safeReply(ctx, `✅ Successfully registered as ${user.role}. You can now receive bills.`);
+    // Only allow registration in private DMs to keep the group clean
+    if (ctx.chat.type !== "private") {
+      return safeReply(ctx, "👋 Please click my profile and send `/start` in a private message to register.");
     }
 
-    // Update details in case they changed their Telegram name
-    user.username = username;
-    user.fullName = fullName;
-    await user.save();
+    const telegramId = String(ctx.from.id);
+    const username = ctx.from.username || "";
+    const fullName = [ctx.from.first_name, ctx.from.last_name].filter(Boolean).join(" ");
 
-    safeReply(ctx, `👋 Welcome back, ${user.fullName}!`);
+    // Check if the user already exists in the database
+    let user = await User.findOne({ telegramId });
+
+    // 🔥 THE FIX: If they already exist, welcome them back and stop the function
+    if (user) {
+      return safeReply(ctx, `👋 Welcome back, ${user.fullName}!\n\nTap /help to view your payment dashboard.`);
+    }
+
+    // If the code reaches this point, they are a brand new user
+    user = new User({
+      telegramId,
+      username,
+      fullName,
+      isActive: true
+    });
+    
+    await user.save();
+    console.log(`✅ New tenant registered: ${fullName} (@${username})`);
+
+    // Send the polished welcome message ONLY to new users
+    const welcomeMessage = 
+      `🎉 <b>Registration Complete!</b>\n\n` +
+      `Welcome to the Compound Utilities Bot, ${ctx.from.first_name}. Your account is now successfully linked to our automated billing system.\n\n` +
+      `<b>How this works:</b>\n` +
+      `⚡ When a new electricity or utility bill is generated, you will be notified.\n` +
+      `💳 You can pay your split securely in <b>Naira</b> (Bank Transfer) or <b>Crypto</b> (USDC/USDT).\n` +
+      `🧾 Your payments will be automatically verified and receipted.\n\n` +
+      `You are all set! You can safely return to the main compound group chat now.\n\n` +
+      `<i>(Tip: You can type /help here at any time to pull up your personal payment menu).</i>`;
+
+    await safeReply(ctx, welcomeMessage, { parse_mode: "HTML" });
+
   } catch (err) {
     console.error("Start command error:", err);
-    safeReply(ctx, "❌ An error occurred during registration.");
+    safeReply(ctx, "❌ An error occurred during registration. Please try again.");
   }
 });
 /* =====================================================
@@ -251,6 +272,14 @@ bot.command("pay", async (ctx) => {
       return safeReply(ctx, "✅ You have already paid this bill.");
     }
 
+    // 🔥 THE LATE FEE MATH 🔥
+    const now = new Date();
+    const isLate = now > bill.dueDate;
+    const penaltyMultiplier = isLate ? 1.10 : 1.00;
+    
+    // Math.ceil ensures we round up to the nearest whole Naira (no decimals)
+    const amountDue = Math.ceil(bill.splitAmount * penaltyMultiplier); 
+
     // Step 1: Initialize Paystack securely
     let paystackRes;
     try {
@@ -258,7 +287,7 @@ bot.command("pay", async (ctx) => {
         "https://api.paystack.co/transaction/initialize",
         {
           email: `${telegramId}@compound-bot.com`, // Dummy email required by Paystack
-          amount: Math.round(bill.splitAmount * 100), // Paystack requires Kobo/Cents
+          amount: Math.round(amountDue * 100), // 👈 Updated to charge the new calculated amountDue
           currency: "NGN",
           metadata: { telegramId }
         },
@@ -280,9 +309,16 @@ bot.command("pay", async (ctx) => {
 
     // Step 2: Attempt to DM the user
     try {
+      // Build a dynamic message so they know why they are being charged more
+      let messageText = `💳 <b>Electricity Bill Checkout</b>\n\n`;
+      if (isLate) {
+        messageText += `⚠️ <b>Notice:</b> The 7-day deadline has passed. A 10% late fee has been applied.\n\n`;
+      }
+      messageText += `Amount Due: ${formatCurrency(amountDue)}`;
+
       await ctx.telegram.sendMessage(
         telegramId,
-        `💳 <b>Electricity Bill Checkout</b>\n\nAmount Due: ${formatCurrency(bill.splitAmount)}`,
+        messageText,
         {
           parse_mode: "HTML",
           ...Markup.inlineKeyboard([Markup.button.url("💰 Pay Securely Now", authUrl)])
@@ -329,13 +365,21 @@ bot.command("cryptopay", async (ctx) => {
 
     if (!process.env.NOWPAYMENTS_API_KEY) return safeReply(ctx, "❌ Web3 Gateway not configured.");
 
+    // 🔥 THE LATE FEE MATH 🔥
+    const now = new Date();
+    const isLate = now > bill.dueDate;
+    const penaltyMultiplier = isLate ? 1.10 : 1.00;
+    
+    // Math.ceil ensures we round up to the nearest whole Naira (no decimals)
+    const amountDue = Math.ceil(bill.splitAmount * penaltyMultiplier); 
+
     // Initialize NowPayments Invoice
     let cryptoRes;
     try {
       cryptoRes = await axios.post(
         "https://api.nowpayments.io/v1/invoice",
         {
-          price_amount: bill.splitAmount,
+          price_amount: amountDue, // 👈 Updated to charge the new calculated amountDue
           price_currency: "ngn", // The API converts NGN to live crypto value
           order_id: `WEB3-${telegramId}-${Date.now()}`,
           order_description: "Compound Electricity Bill",
@@ -356,9 +400,16 @@ bot.command("cryptopay", async (ctx) => {
     if (!cryptoLink) return safeReply(ctx, "❌ Failed to generate a Web3 payment link.");
 
     try {
+      // Build a dynamic message so they know why they are being charged more
+      let messageText = `🌐 <b>Web3 Electricity Checkout</b>\n\n`;
+      if (isLate) {
+        messageText += `⚠️ <b>Notice:</b> The 7-day deadline has passed. A 10% late fee has been applied.\n\n`;
+      }
+      messageText += `Amount Due: ${formatCurrency(amountDue)}\nSupported: USDC & USDT on Base, BNB, Polygon, Avax, Solana.`;
+
       await ctx.telegram.sendMessage(
         telegramId,
-        `🌐 <b>Web3 Electricity Checkout</b>\n\nAmount Due: ${formatCurrency(bill.splitAmount)}\nSupported: USDC & USDT on Base, BNB, Polygon, Avax, Solana.`,
+        messageText,
         {
           parse_mode: "HTML",
           ...Markup.inlineKeyboard([Markup.button.url("⛓️ Pay with Crypto", cryptoLink)])
