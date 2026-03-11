@@ -25,12 +25,19 @@ const app = express();
    MIDDLEWARE (ORDER IS CRITICAL FOR WEBHOOKS)
 ===================================================== */
 // Paystack webhook MUST be parsed as raw data to verify the cryptographic signature
-app.use("/paystack-webhook", express.raw({ type: "application/json" }));
-app.use(express.json());
+// app.use("/paystack-webhook", express.raw({ type: "application/json" }));
+// app.use(express.json());
 
-// Webhooks MUST be parsed as raw data to verify the cryptographic signatures
+// // Webhooks MUST be parsed as raw data to verify the cryptographic signatures
+// app.use("/paystack-webhook", express.raw({ type: "application/json" }));
+// app.use("/crypto-webhook", express.raw({ type: "application/json" })); // 🔥 Your new Web3 middleware
+// app.use(express.json());
+
+// Both webhooks MUST be parsed as raw data BEFORE express.json() intercepts them!
 app.use("/paystack-webhook", express.raw({ type: "application/json" }));
-app.use("/crypto-webhook", express.raw({ type: "application/json" })); // 🔥 Your new Web3 middleware
+app.use("/crypto-webhook", express.raw({ type: "application/json" }));
+
+// Now it is safe to parse the rest of the app as JSON
 app.use(express.json());
 
 /* =====================================================
@@ -990,16 +997,16 @@ app.post("/crypto-webhook", async (req, res) => {
 ===================================================== */
 async function syncToDune() {
   try {
-    // Fetch ALL bills from the database
     const allBills = await Bill.find({});
     
     let csvString = "telegram_id,full_name,amount_paid_ngn,reference,date_paid,billing_cycle\n";
     let paymentCount = 0;
     
     for (const bill of allBills) {
-      // 🔥 THE FIX: Skip the test bills! 
-      // If the split amount was less than 1000 Naira, it ignores it completely.
-      if (bill.splitAmount < 1000) continue; 
+      // 🔥 THE BULLETPROOF FILTER: Ignore any test bills created before March 9.
+      // Since your test payments happened on March 7, this permanently ignores them.
+      const cutoffDate = new Date("2026-03-09T00:00:00Z");
+      if (new Date(bill.createdAt) < cutoffDate) continue; 
 
       const billDate = new Date(bill.createdAt);
       billDate.setMonth(billDate.getMonth() - 1); 
@@ -1016,10 +1023,11 @@ async function syncToDune() {
       }
     }
 
-    // If no real production payments exist, abort the upload
+    // 🔥 THE EMPTY STATE FIX: If no one has paid the REAL bill yet, 
+    // we must STILL send a file to Dune to overwrite and erase the old test data!
     if (paymentCount === 0) {
-      console.log("⚠️ No production payments found yet. Skipping Dune upload.");
-      return;
+      const now = new Date().toISOString().replace('T', ' ').substring(0, 19);
+      csvString += `0,Awaiting First Payment,0,PENDING,${now},Pending\n`;
     }
 
     await axios.post(
@@ -1037,7 +1045,7 @@ async function syncToDune() {
       }
     );
     
-    console.log(`✅ Event-Driven Sync: ${paymentCount} production payments pushed to Dune instantly.`);
+    console.log(`✅ Event-Driven Sync: Ledger pushed to Dune instantly.`);
 
   } catch (err) {
     console.error("❌ Dune Real-Time Sync Error:", err.response?.data || err.message);
