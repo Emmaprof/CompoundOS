@@ -844,6 +844,25 @@ bot.command("export", async (ctx) => {
     safeReply(ctx, "❌ An error occurred while generating the CSV file.");
   }
 });
+/* =====================================================
+   ADMIN COMMAND: MANUAL DUNE SYNC
+===================================================== */
+bot.command("forcesync", async (ctx) => {
+  try {
+    // Security check: Only YOU can run this command
+    if (String(ctx.from.id) !== process.env.ADMIN_ID) return;
+
+    await ctx.reply("🔄 Manually triggering database sync to Dune Analytics...");
+    
+    // Call the exact same function the webhooks use
+    await syncToDune();
+    
+    await ctx.reply("✅ Sync complete! The 'February 2026' table is live on Dune.");
+  } catch (err) {
+    console.error(err);
+    ctx.reply("❌ Sync failed. Check the Render logs.");
+  }
+});
 
 /* =====================================================
    WEBHOOK (PAYSTACK LISTENER)
@@ -890,6 +909,7 @@ app.post("/paystack-webhook", async (req, res) => {
     });
     
     await bill.save();
+    await syncToDune();
 
     // Notify the group
     await bot.telegram.sendMessage(
@@ -952,6 +972,7 @@ app.post("/crypto-webhook", async (req, res) => {
     });
     
     await bill.save();
+    await syncToDune();
 
     await bot.telegram.sendMessage(
       process.env.GROUP_ID,
@@ -965,49 +986,59 @@ app.post("/crypto-webhook", async (req, res) => {
   }
 });
 /* =====================================================
-   AUTOMATION: DUNE ANALYTICS DAILY SYNC
+   AUTOMATION: DUNE ANALYTICS REAL-TIME SYNC
 ===================================================== */
-cron.schedule("0 2 * * *", async () => { 
+async function syncToDune() {
   try {
-    const bill = await Bill.findOne({ isActive: true });
+    // Fetch ALL bills, skipping test bills created before March 10, 2026
+    const productionDate = new Date("2026-03-10T00:00:00Z");
+    const allBills = await Bill.find({ createdAt: { $gte: productionDate } });
     
-    if (!bill || bill.payments.length === 0) return;
+    if (allBills.length === 0) return;
 
-    // 1. Build the CSV string with headers matching your DuneSQL queries EXACTLY
-    let csvString = "telegram_id,full_name,amount_paid_ngn,reference,date_paid\n";
+    // Notice the new 'billing_cycle' column
+    let csvString = "telegram_id,full_name,amount_paid_ngn,reference,date_paid,billing_cycle\n";
+    let paymentCount = 0;
     
-    for (const p of bill.payments) {
-      const safeName = p.fullName ? p.fullName.replace(/,/g, "") : "Unknown";
-      
-      // Format the date to clean SQL format (YYYY-MM-DD HH:MM:SS) to avoid Dune parsing errors
-      const dateObj = new Date(p.paidAt);
-      const sqlDate = dateObj.toISOString().replace('T', ' ').substring(0, 19);
-      
-      csvString += `${p.telegramId},${safeName},${p.amount},${p.reference},${sqlDate}\n`;
+    for (const bill of allBills) {
+      const billDate = new Date(bill.createdAt);
+      billDate.setMonth(billDate.getMonth() - 1); 
+      const monthNames = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+      const billingCycle = `${monthNames[billDate.getMonth()]} ${billDate.getFullYear()}`;
+
+      for (const p of bill.payments) {
+        const safeName = p.fullName ? p.fullName.replace(/,/g, "") : "Unknown";
+        const dateObj = new Date(p.paidAt);
+        const sqlDate = dateObj.toISOString().replace('T', ' ').substring(0, 19);
+        
+        csvString += `${p.telegramId},${safeName},${p.amount},${p.reference},${sqlDate},${billingCycle}\n`;
+        paymentCount++;
+      }
     }
 
-    // 2. Send the CSV to Dune's new 2026 Upload API
+    if (paymentCount === 0) return;
+
     await axios.post(
       "https://api.dune.com/api/v1/uploads/csv", 
       {
-        table_name: "compound_payments", // This will create dune.decentralizeddev.dataset_compound_payments
+        table_name: "compound_payments", 
         data: csvString,
-        description: "Automated daily ledger upload from Node.js"
+        description: "Real-time master ledger upload"
       },
       {
         headers: {
           "X-DUNE-API-KEY": process.env.DUNE_API_KEY,
-          "Content-Type": "application/json" // The API requires the payload itself to be JSON
+          "Content-Type": "application/json" 
         }
       }
     );
     
-    console.log("✅ Successfully synced daily payments to Dune Analytics.");
+    console.log(`✅ Event-Driven Sync: ${paymentCount} payments pushed to Dune instantly.`);
 
   } catch (err) {
-    console.error("❌ Dune Sync Error:", err.response?.data || err.message);
+    console.error("❌ Dune Real-Time Sync Error:", err.response?.data || err.message);
   }
-});
+}
 /* =====================================================
    AUTOMATION: DAILY PAYMENT REMINDER (9:00 AM)
 ===================================================== */
