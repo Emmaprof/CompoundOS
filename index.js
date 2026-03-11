@@ -1003,19 +1003,19 @@ async function syncToDune() {
     let paymentCount = 0;
     
     for (const bill of allBills) {
-      // 🔥 THE BULLETPROOF FILTER: Ignore any test bills created before March 9.
-      // Since your test payments happened on March 7, this permanently ignores them.
-      const cutoffDate = new Date("2026-03-09T00:00:00Z");
-      if (new Date(bill.createdAt) < cutoffDate) continue; 
-
-      const billDate = new Date(bill.createdAt);
+      // Fallback to current month if createdAt is missing from your schema
+      const billDate = bill.createdAt ? new Date(bill.createdAt) : new Date();
       billDate.setMonth(billDate.getMonth() - 1); 
       const monthNames = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
       const billingCycle = `${monthNames[billDate.getMonth()]} ${billDate.getFullYear()}`;
 
       for (const p of bill.payments) {
+        // 🔥 THE BULLETPROOF FILTER: Look directly at the money!
+        // We know p.amount exists. If it's your 250 Naira test payment, skip it.
+        if (p.amount < 1000) continue;
+
         const safeName = p.fullName ? p.fullName.replace(/,/g, "") : "Unknown";
-        const dateObj = new Date(p.paidAt);
+        const dateObj = p.paidAt ? new Date(p.paidAt) : new Date();
         const sqlDate = dateObj.toISOString().replace('T', ' ').substring(0, 19);
         
         csvString += `${p.telegramId},${safeName},${p.amount},${p.reference},${sqlDate},${billingCycle}\n`;
@@ -1023,8 +1023,7 @@ async function syncToDune() {
       }
     }
 
-    // 🔥 THE EMPTY STATE FIX: If no one has paid the REAL bill yet, 
-    // we must STILL send a file to Dune to overwrite and erase the old test data!
+    // If only test payments existed, overwrite Dune with a clean slate
     if (paymentCount === 0) {
       const now = new Date().toISOString().replace('T', ' ').substring(0, 19);
       csvString += `0,Awaiting First Payment,0,PENDING,${now},Pending\n`;
@@ -1033,7 +1032,7 @@ async function syncToDune() {
     await axios.post(
       "https://api.dune.com/api/v1/uploads/csv", 
       {
-        table_name: "compound_payments", 
+        table_name: "compound_payments", // Dune automatically adds 'dataset_' to this
         data: csvString,
         description: "Real-time master ledger upload"
       },
