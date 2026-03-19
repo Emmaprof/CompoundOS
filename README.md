@@ -4,7 +4,7 @@ An automated, event-driven utility billing engine and Web3 financial transparenc
 
 This repository houses **CompoundOS** (the backend architecture) and **The Oracle** (the Telegram bot interface). Together, they replace manual spreadsheet tracking with dual-currency payment gateways, automated penalty logic, and a real-time data pipeline that pushes immutable financial ledgers directly to a public Dune Analytics dashboard.
 
-## 🏗️ System Architecture
+## System Architecture
 
 The system is built on a modern Node.js stack with a strict separation of concerns:
 
@@ -13,7 +13,7 @@ The system is built on a modern Node.js stack with a strict separation of concer
 3. **The Gateways (Express Webhooks):** Listens for asynchronous payment confirmations from Paystack (Fiat/Bank Transfers) and NowPayments (Web3/USDC/USDT).
 4. **The Analytics Engine (Dune API):** An event-driven function triggers on every successful webhook, dynamically generating a master CSV ledger and pushing it to Dune Analytics to instantly update the public dashboard.
 
-## ✨ Core Features
+## Core Features
 
 * **Dual-Currency Checkouts:** Tenants can pay their split in Fiat (Naira) or Crypto (Stablecoins on Base, Polygon, Solana, etc.).
 * **Automated Penalty Logic:** The system tracks a 7-day grace period and automatically applies a mathematically precise 10% late fee to any checkout link generated after the deadline.
@@ -21,7 +21,7 @@ The system is built on a modern Node.js stack with a strict separation of concer
 * **Gamified Transparency:** The Dune dashboard features a "Settlement Leaderboard" (awarding 🥇🥈🥉 to the fastest payers), payment velocity tracking, and a public audit ledger.
 * **Admin Command Center:** Secure, hidden commands (`/newbill`, `/broadcast`, `/markpaid`, `/forcesync`) allow the admin to manage the entire compound from their phone.
 
-## 🛠️ Tech Stack
+## Tech Stack
 
 * **Backend:** Node.js, Express
 * **Bot Framework:** Telegraf (Telegram API)
@@ -29,7 +29,7 @@ The system is built on a modern Node.js stack with a strict separation of concer
 * **Payment Gateways:** Paystack API, NowPayments Web3 API
 * **Data Visualization:** Dune Analytics (API & DuneSQL)
 
-## 🚀 Environment Setup
+## Environment Setup
 
 To run this engine locally, you will need the following environment variables in your `.env` file:
 
